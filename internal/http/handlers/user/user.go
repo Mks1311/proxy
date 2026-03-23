@@ -141,6 +141,24 @@ func Validate(c *gin.Context) {
 	})
 }
 
+func Logout(c *gin.Context) {
+	// Delete the cookie by setting same name but expired
+	c.SetSameSite(http.SameSiteLaxMode)
+	c.SetCookie(
+		"Authorization",
+		"",
+		-1, // Expire immediately
+		"",
+		"",
+		false,
+		true, // HttpOnly
+	)
+
+	c.JSON(http.StatusOK, gin.H{
+		"message": "Logged out successfully",
+	})
+}
+
 func GetUserByApiKey(apiKey string) (*models.User, error) {
 	var user models.User
 	result := database.DB.First(&user, "api_key = ?", apiKey)

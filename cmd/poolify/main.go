@@ -7,6 +7,7 @@ import (
 	"github.com/Mks1311/poolify/internal/database"
 	gropqproxy "github.com/Mks1311/poolify/internal/http/handlers/groqproxy"
 	"github.com/Mks1311/poolify/internal/http/handlers/user"
+	"github.com/Mks1311/poolify/internal/http/middleware"
 	"github.com/gin-contrib/cors"
 	"github.com/gin-gonic/gin"
 	"github.com/joho/godotenv"
@@ -58,10 +59,12 @@ func main() {
 		userRoute.POST("/signup", user.Signup)
 		userRoute.POST("/login", user.Login)
 		userRoute.GET("/validate", user.Validate)
+		userRoute.POST("/logout", user.Logout)
 	}
 
 	// proxy endpoint group
 	proxy := r.Group("/proxy")
+	proxy.Use(middleware.AuthMiddleware())
 	{
 		// groqai proxy endpoint
 		proxy.POST("/groqai", gropqproxy.GroqProxy)
