@@ -11,7 +11,7 @@ import (
 var RedisClient *redis.Client
 var Ctx = context.Background()
 
-func InitRedis() {
+func InitRedis() error {
 	RedisClient = redis.NewClient(&redis.Options{
 		Addr:     "localhost:6379",
 		Password: "", // no password
@@ -22,7 +22,9 @@ func InitRedis() {
 	_, err := RedisClient.Ping(Ctx).Result()
 	if err != nil {
 		log.Fatal("Failed to connect to Redis:", err)
+		return err
 	}
 
 	fmt.Println("✅ Connected to Redis")
+	return nil
 }

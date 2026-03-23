@@ -26,6 +26,11 @@ func main() {
 		log.Fatal("Error connecting to database:", err)
 	}
 
+	err = database.InitRedis()
+	if err != nil {
+		log.Fatal("Error connecting to Redis:", err)
+	}
+
 	// Create a Gin router with default middleware (logger and recovery)
 	r := gin.Default()
 
@@ -64,6 +69,7 @@ func main() {
 
 	// proxy endpoint group
 	proxy := r.Group("/proxy")
+	proxy.Use(middleware.RateLimitMiddleware())
 	proxy.Use(middleware.AuthMiddleware())
 	{
 		// groqai proxy endpoint
