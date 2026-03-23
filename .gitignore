@@ -1,0 +1,80 @@
+# Binaries
+
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+
+# Test binary
+
+*.test
+
+# Output of go build
+
+*.out
+
+# Go workspace file
+
+go.work
+go.work.sum
+
+# Dependency directories (if you use vendoring)
+
+vendor/
+
+# IDE / Editor files
+
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS files
+
+.DS_Store
+Thumbs.db
+
+# Logs
+
+*.log
+
+# Environment files
+
+.env
+.env.*
+!.env.example
+
+# Build directories
+
+/bin/
+/dist/
+/build/
+
+# Coverage reports
+
+coverage.out
+
+# GoLand specific
+
+*.iml
+
+# Temporary files
+
+tmp/
+temp/
+
+# Cache
+
+.cache/
+
+# Node modules (if using frontend in same repo)
+
+node_modules/
+
+# Docker
+
+*.pid
+*.seed
+*.pid.lock
