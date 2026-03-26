@@ -11,7 +11,7 @@ import (
 )
 
 func RateLimitMiddleware() gin.HandlerFunc {
-	println("Initializing rate limiter middleware")
+
 	limiter := ratelimit.NewTokenBucket(database.RedisClient)
 
 	return func(c *gin.Context) {
@@ -26,7 +26,7 @@ func RateLimitMiddleware() gin.HandlerFunc {
 		user := userInterface.(*models.User)
 
 		// Try to consume a token
-		allowed, remaining, resetTime, err := limiter.ConsumeToken(user.ID, 1)
+		allowed, remaining, resetTime, err := limiter.ConsumeToken(user.ID, user.DailyLimit)
 		if err != nil {
 			c.JSON(500, gin.H{"error": "Rate limit check failed"})
 			c.Abort()
@@ -34,7 +34,7 @@ func RateLimitMiddleware() gin.HandlerFunc {
 		}
 
 		// Add rate limit headers to response
-		c.Header("X-RateLimit-Limit", fmt.Sprintf("%d", user.DailyQuota))
+		c.Header("X-RateLimit-Limit", fmt.Sprintf("%d", user.DailyLimit))
 		c.Header("X-RateLimit-Remaining", fmt.Sprintf("%d", remaining))
 		c.Header("X-RateLimit-Reset", fmt.Sprintf("%d", resetTime.Unix()))
 
@@ -45,10 +45,10 @@ func RateLimitMiddleware() gin.HandlerFunc {
 
 			c.JSON(429, gin.H{
 				"error":       "Rate limit exceeded",
-				"message":     fmt.Sprintf("You have exceeded your daily quota of %d requests", user.DailyQuota),
+				"message":     fmt.Sprintf("You have exceeded your daily quota of %d requests", user.DailyLimit),
 				"retry_after": retryAfter,
 				"reset_time":  resetTime.Format(time.RFC3339),
-				"limit":       user.DailyQuota,
+				"limit":       user.DailyLimit,
 				"remaining":   0,
 			})
 			c.Abort()

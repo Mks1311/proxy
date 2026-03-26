@@ -69,8 +69,8 @@ func main() {
 
 	// proxy endpoint group
 	proxy := r.Group("/proxy")
-	proxy.Use(middleware.RateLimitMiddleware())
 	proxy.Use(middleware.AuthMiddleware())
+	proxy.Use(middleware.RateLimitMiddleware())
 	{
 		// groqai proxy endpoint
 		proxy.POST("/groqai", gropqproxy.GroqProxy)

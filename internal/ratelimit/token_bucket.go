@@ -6,7 +6,7 @@ import (
 	"strconv"
 	"time"
 
-	"github.com/go-redis/redis/v8"
+	"github.com/redis/go-redis/v9"
 )
 
 type TokenBucket struct {
@@ -23,8 +23,8 @@ func NewTokenBucket(redisClient *redis.Client) *TokenBucket {
 
 // ConsumeToken attempts to consume 1 token for the user
 // Returns: (allowed bool, remaining tokens, reset time, error)
-func (tb *TokenBucket) ConsumeToken(userID uint, dailyLimit int) (bool, int, time.Time, error) {
-	key := fmt.Sprintf("ratelimit:user:%d:daily", userID)
+func (tb *TokenBucket) ConsumeToken(userID string, dailyLimit int) (bool, int, time.Time, error) {
+	key := fmt.Sprintf("ratelimit:user:%s:daily", userID)
 
 	// Calculate TTL until midnight
 	now := time.Now()
