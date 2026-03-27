@@ -6,8 +6,8 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"os"
 
+	"github.com/Mks1311/poolify/internal/http/handlers/apikey"
 	"github.com/gin-gonic/gin"
 )
 
@@ -34,6 +34,8 @@ type APIError struct {
 	Code    string `json:"code"`
 }
 
+var GroqServiceRateLimit = 30
+
 func GroqProxy(c *gin.Context) {
 	// 1. Get message from request body
 	var input struct {
@@ -52,9 +54,9 @@ func GroqProxy(c *gin.Context) {
 	}
 
 	// 3. Get API key
-	groqApiKey := os.Getenv("GROK_1")
-	if groqApiKey == "" {
-		c.JSON(500, gin.H{"error": "GROK_1 not set in environment"})
+	groqApiKey, ok := apikey.GetAvailableKey("groq", GroqServiceRateLimit)
+	if !ok {
+		c.JSON(500, gin.H{"error": "No available API key for groq"})
 		return
 	}
 

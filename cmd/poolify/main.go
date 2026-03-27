@@ -5,6 +5,7 @@ import (
 	"net/http"
 
 	"github.com/Mks1311/poolify/internal/database"
+	"github.com/Mks1311/poolify/internal/http/handlers/apikey"
 	gropqproxy "github.com/Mks1311/poolify/internal/http/handlers/groqproxy"
 	"github.com/Mks1311/poolify/internal/http/handlers/user"
 	"github.com/Mks1311/poolify/internal/http/middleware"
@@ -59,7 +60,7 @@ func main() {
 		})
 	})
 
-	userRoute := r.Group("/api")
+	userRoute := r.Group("/user")
 	{
 		userRoute.POST("/signup", user.Signup)
 		userRoute.POST("/login", user.Login)
@@ -68,13 +69,19 @@ func main() {
 	}
 
 	// proxy endpoint group
-	proxy := r.Group("/proxy")
-	proxy.Use(middleware.AuthMiddleware())
-	proxy.Use(middleware.RateLimitMiddleware())
+	proxyRoute := r.Group("/proxy")
+	proxyRoute.Use(middleware.AuthMiddleware())
+	proxyRoute.Use(middleware.RateLimitMiddleware())
 	{
 		// groqai proxy endpoint
-		proxy.POST("/groqai", gropqproxy.GroqProxy)
+		proxyRoute.POST("/groqai", gropqproxy.GroqProxy)
 
+	}
+
+	apiKeyRoute := r.Group("/key")
+	apiKeyRoute.Use(middleware.AuthMiddleware())
+	{
+		apiKeyRoute.POST("/add", apikey.AddApiKey)
 	}
 
 	// Start server on port 8080 (default)
