@@ -82,7 +82,7 @@ func main() {
 		},
 		AllowMethods: []string{"GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"},
 		AllowHeaders: []string{
-			"Origin", "Content-Type", "Authorization",
+			"Origin", "Content-Type", "Authorization", "X-API-Key",
 		},
 		AllowCredentials: true,
 		MaxAge:           12 * time.Hour,
