@@ -78,7 +78,7 @@ func main() {
 	r.Use(cors.New(cors.Config{
 		AllowOrigins: []string{
 			// "http://localhost:3000",
-			"https://pooliy-frontend.onrender.com/",
+			"https://pooliy-frontend.onrender.com",
 		},
 		AllowMethods: []string{"GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"},
 		AllowHeaders: []string{
