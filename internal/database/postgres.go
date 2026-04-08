@@ -63,6 +63,7 @@ func Migrate() error {
 	err := DB.AutoMigrate(
 		&models.User{},
 		&models.APIKeyPool{},
+		&models.TokenUsage{},
 	)
 
 	if err != nil {

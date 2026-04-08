@@ -21,10 +21,11 @@ func NewTokenBucket(redisClient *redis.Client) *TokenBucket {
 	}
 }
 
-// ConsumeToken attempts to consume 1 token for the user
+// CheckBudget checks if the user has any remaining token budget WITHOUT consuming.
+// This is called pre-request as a gate check. Actual deduction happens post-response.
 // Returns: (allowed bool, remaining tokens, reset time, error)
-func (tb *TokenBucket) ConsumeToken(userID string, dailyLimit int) (bool, int, time.Time, error) {
-	key := fmt.Sprintf("ratelimit:user:%s:daily", userID)
+func (tb *TokenBucket) CheckBudget(userID string, dailyLimit int) (bool, int, time.Time, error) {
+	key := fmt.Sprintf("ratelimit:user:%s:daily_tokens", userID)
 
 	// Calculate TTL until midnight
 	now := time.Now()
@@ -40,7 +41,7 @@ func (tb *TokenBucket) ConsumeToken(userID string, dailyLimit int) (bool, int, t
 	var currentTokens int
 
 	if set {
-		// Key was just created
+		// Key was just created — full budget available
 		currentTokens = dailyLimit
 	} else {
 		// Key already exists → fetch current value
@@ -55,37 +56,46 @@ func (tb *TokenBucket) ConsumeToken(userID string, dailyLimit int) (bool, int, t
 		}
 	}
 
+	// Get reset time from TTL
+	remainingTTL, err := tb.redisClient.TTL(tb.ctx, key).Result()
+	if err != nil {
+		return false, 0, time.Time{}, err
+	}
+	resetTime := time.Now().Add(remainingTTL)
+
 	// Check if tokens available
 	if currentTokens <= 0 {
-		ttl, err := tb.redisClient.TTL(tb.ctx, key).Result()
-		if err != nil {
-			return false, 0, time.Time{}, err
-		}
-
-		resetTime := time.Now().Add(ttl)
 		return false, 0, resetTime, nil
 	}
 
-	// Atomically decrement token
-	newTokens, err := tb.redisClient.Decr(tb.ctx, key).Result()
-	if err != nil {
-		return false, 0, time.Time{}, err
-	}
-
-	// Get reset time
-	ttl, err = tb.redisClient.TTL(tb.ctx, key).Result()
-	if err != nil {
-		return false, 0, time.Time{}, err
-	}
-
-	resetTime := time.Now().Add(ttl)
-
-	return true, int(newTokens), resetTime, nil
+	return true, currentTokens, resetTime, nil
 }
 
-// GetRemainingTokens returns the current token count without consuming
-func (tb *TokenBucket) GetRemainingTokens(userID uint, dailyLimit int) (int, time.Time, error) {
-	key := fmt.Sprintf("ratelimit:user:%d:daily", userID)
+// DeductTokens decreases the user's token budget by the given amount.
+// Called post-response after we know the actual token cost.
+// Returns: (newRemaining int, error)
+func (tb *TokenBucket) DeductTokens(userID string, tokens int, dailyLimit int) (int, error) {
+	key := fmt.Sprintf("ratelimit:user:%s:daily_tokens", userID)
+
+	// Ensure the key exists (in case of race condition on first req)
+	now := time.Now()
+	midnight := time.Date(now.Year(), now.Month(), now.Day()+1, 0, 0, 0, 0, now.Location())
+	ttl := time.Until(midnight)
+
+	tb.redisClient.SetNX(tb.ctx, key, dailyLimit, ttl)
+
+	// Atomically decrement by the token count
+	newVal, err := tb.redisClient.DecrBy(tb.ctx, key, int64(tokens)).Result()
+	if err != nil {
+		return 0, err
+	}
+
+	return int(newVal), nil
+}
+
+// GetRemainingTokens returns the current token count without consuming.
+func (tb *TokenBucket) GetRemainingTokens(userID string, dailyLimit int) (int, time.Time, error) {
+	key := fmt.Sprintf("ratelimit:user:%s:daily_tokens", userID)
 
 	tokensStr, err := tb.redisClient.Get(tb.ctx, key).Result()
 
@@ -98,8 +108,7 @@ func (tb *TokenBucket) GetRemainingTokens(userID uint, dailyLimit int) (int, tim
 		return 0, time.Time{}, err
 	}
 
-	var currentTokens int
-	currentTokens, err = strconv.Atoi(tokensStr)
+	currentTokens, err := strconv.Atoi(tokensStr)
 	if err != nil {
 		return 0, time.Time{}, err
 	}
@@ -111,7 +120,7 @@ func (tb *TokenBucket) GetRemainingTokens(userID uint, dailyLimit int) (int, tim
 }
 
 // ResetUserQuota manually resets a user's quota (useful for testing or admin features)
-func (tb *TokenBucket) ResetUserQuota(userID uint) error {
-	key := fmt.Sprintf("ratelimit:user:%d:daily", userID)
+func (tb *TokenBucket) ResetUserQuota(userID string) error {
+	key := fmt.Sprintf("ratelimit:user:%s:daily_tokens", userID)
 	return tb.redisClient.Del(tb.ctx, key).Err()
 }

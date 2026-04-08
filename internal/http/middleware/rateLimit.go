@@ -25,8 +25,10 @@ func RateLimitMiddleware() gin.HandlerFunc {
 
 		user := userInterface.(*models.User)
 
-		// Try to consume a token
-		allowed, remaining, resetTime, err := limiter.ConsumeToken(user.ID, user.DailyLimit)
+		// Pre-request check: does this user have any token budget left?
+		// We don't deduct here — actual deduction happens after the response
+		// when we know the real token cost.
+		allowed, remaining, resetTime, err := limiter.CheckBudget(user.ID, user.DailyLimit)
 		if err != nil {
 			c.JSON(500, gin.H{"error": "Rate limit check failed"})
 			c.Abort()
@@ -39,13 +41,13 @@ func RateLimitMiddleware() gin.HandlerFunc {
 		c.Header("X-RateLimit-Reset", fmt.Sprintf("%d", resetTime.Unix()))
 
 		if !allowed {
-			// Rate limit exceeded
+			// Token budget exhausted
 			retryAfter := int(time.Until(resetTime).Seconds())
 			c.Header("Retry-After", fmt.Sprintf("%d", retryAfter))
 
 			c.JSON(429, gin.H{
 				"error":       "Rate limit exceeded",
-				"message":     fmt.Sprintf("You have exceeded your daily quota of %d requests", user.DailyLimit),
+				"message":     fmt.Sprintf("You have exceeded your daily token quota of %d tokens", user.DailyLimit),
 				"retry_after": retryAfter,
 				"reset_time":  resetTime.Format(time.RFC3339),
 				"limit":       user.DailyLimit,
@@ -54,6 +56,9 @@ func RateLimitMiddleware() gin.HandlerFunc {
 			c.Abort()
 			return
 		}
+
+		// Store the limiter in context so the handler/scheduler can deduct tokens later
+		c.Set("limiter", limiter)
 
 		// Request allowed, continue
 		c.Next()
