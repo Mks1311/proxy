@@ -1,7 +1,6 @@
 package database
 
 import (
-	"fmt"
 	"log"
 	"os"
 
@@ -14,26 +13,14 @@ import (
 var DB *gorm.DB
 
 func ConnectPostgres() error {
-	dbHost := getEnv("DB_HOST", "localhost")
-	dbPort := getEnv("DB_PORT", "5432")
-	dbUser := getEnv("DB_USER", "postgres")
-	dbPassword := os.Getenv("DB_PASSWORD") // No default for password
-	dbName := getEnv("DB_NAME", "proxy-db")
-	dbSSLMode := getEnv("DB_SSLMODE", "disable")
+	dsn := os.Getenv("DATABASE_URL")
 
-	dsn := fmt.Sprintf(
-		"host=%s port=%s user=%s password=%s dbname=%s sslmode=%s",
-		dbHost,
-		dbPort,
-		dbUser,
-		dbPassword,
-		dbName,
-		dbSSLMode,
-	)
+	if dsn == "" {
+		log.Fatal("DATABASE_URL not set")
+	}
 
-	// Connect to database
 	database, err := gorm.Open(postgres.Open(dsn), &gorm.Config{
-		Logger: logger.Default.LogMode(logger.Info), // Show SQL queries in console
+		Logger: logger.Default.LogMode(logger.Info),
 	})
 
 	if err != nil {
@@ -45,7 +32,6 @@ func ConnectPostgres() error {
 	log.Println("Database connection established")
 
 	Migrate()
-
 	return nil
 }
 
