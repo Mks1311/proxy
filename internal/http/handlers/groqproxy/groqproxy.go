@@ -34,8 +34,6 @@ type APIError struct {
 	Code    string `json:"code"`
 }
 
-var GroqServiceRateLimit = 30
-
 func GroqProxy(c *gin.Context) {
 	// 1. Get message from request body
 	var input struct {
@@ -54,7 +52,7 @@ func GroqProxy(c *gin.Context) {
 	}
 
 	// 3. Get API key
-	groqApiKey, ok := apikey.GetAvailableKey("groq", GroqServiceRateLimit)
+	groqApiKey, ok := apikey.ConsumeAvailableKey("groq")
 	if !ok {
 		c.JSON(500, gin.H{"error": "No available API key for groq"})
 		return

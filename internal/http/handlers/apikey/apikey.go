@@ -7,6 +7,7 @@ import (
 	"github.com/Mks1311/poolify/internal/models"
 	"github.com/gin-gonic/gin"
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 )
 
 func AddApiKey(c *gin.Context) {
@@ -63,20 +64,39 @@ func AddApiKey(c *gin.Context) {
 	})
 }
 
-func GetAvailableKey(service string, serviceSpecificRateLimit int) (string, bool) {
+func ConsumeAvailableKey(service string) (string, bool) {
 	var apiKeyPool models.APIKeyPool
-	if err := database.DB.Where("service = ? AND is_active = ? AND rate_limit >= ?", service, true, serviceSpecificRateLimit).Order("requests_today ASC").First(&apiKeyPool).Error; err != nil {
-		return "", false
-	}
-	if err := ConsumeServiceKey(apiKeyPool.APIKey); err != nil {
-		return "", false
-	}
-	return apiKeyPool.APIKey, true
-}
 
-func ConsumeServiceKey(apiKey string) error {
-	return database.DB.Model(&models.APIKeyPool{}).
-		Where("api_key = ?", apiKey).
-		UpdateColumn("requests_today", gorm.Expr("requests_today + ?", 1)).
-		Error
+	// Start a transaction to make select + update atomic
+	tx := database.DB.Begin()
+	defer func() {
+		if r := recover(); r != nil {
+			tx.Rollback()
+		}
+	}()
+
+	// Lock the row for update (prevents race condition)
+	if err := tx.Where("service = ? AND is_active = ? AND requests_today < rate_limit",
+		service, true).
+		Order("requests_today ASC").
+		Clauses(clause.Locking{Strength: "UPDATE"}). // FOR UPDATE lock
+		First(&apiKeyPool).Error; err != nil {
+		tx.Rollback()
+		return "", false
+	}
+
+	// Increment request count
+	if err := tx.Model(&models.APIKeyPool{}).
+		Where("id = ?", apiKeyPool.ID).
+		UpdateColumn("requests_today", gorm.Expr("requests_today + ?", 1)).Error; err != nil {
+		tx.Rollback()
+		return "", false
+	}
+
+	// Commit transaction
+	if err := tx.Commit().Error; err != nil {
+		return "", false
+	}
+
+	return apiKeyPool.APIKey, true
 }

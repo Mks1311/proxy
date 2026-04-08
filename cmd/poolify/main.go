@@ -9,10 +9,24 @@ import (
 	gropqproxy "github.com/Mks1311/poolify/internal/http/handlers/groqproxy"
 	"github.com/Mks1311/poolify/internal/http/handlers/user"
 	"github.com/Mks1311/poolify/internal/http/middleware"
+	"github.com/Mks1311/poolify/internal/utils"
 	"github.com/gin-contrib/cors"
 	"github.com/gin-gonic/gin"
 	"github.com/joho/godotenv"
+	"github.com/robfig/cron"
 )
+
+func RunCron() {
+	c := cron.New()
+
+	err := c.AddFunc("@daily", utils.ResetApiUsageDaily)
+	if err != nil {
+		log.Fatal("Failed to schedule cron:", err)
+	}
+
+	c.Start()
+	log.Println("Cron started...")
+}
 
 func main() {
 
@@ -83,6 +97,9 @@ func main() {
 	{
 		apiKeyRoute.POST("/add", apikey.AddApiKey)
 	}
+
+	// running cron job
+	RunCron()
 
 	// Start server on port 8080 (default)
 	// Server will listen on 0.0.0.0:8080 (localhost:8080 on Windows)
