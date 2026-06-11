@@ -11,9 +11,12 @@ import (
 	"github.com/Mks1311/poolify/internal/database"
 	"github.com/Mks1311/poolify/internal/http/handlers/analytics"
 	"github.com/Mks1311/poolify/internal/http/handlers/apikey"
-	gropqproxy "github.com/Mks1311/poolify/internal/http/handlers/groqproxy"
+	"github.com/Mks1311/poolify/internal/http/handlers/chat"
 	"github.com/Mks1311/poolify/internal/http/handlers/user"
 	"github.com/Mks1311/poolify/internal/http/middleware"
+	"github.com/Mks1311/poolify/internal/provider"
+	"github.com/Mks1311/poolify/internal/provider/groq"
+	"github.com/Mks1311/poolify/internal/provider/openrouter"
 	"github.com/Mks1311/poolify/internal/scheduler"
 	"github.com/Mks1311/poolify/internal/utils"
 	"github.com/gin-contrib/cors"
@@ -52,15 +55,24 @@ func main() {
 		log.Fatal("Error connecting to Redis:", err)
 	}
 
-	// Initialize the fair-queuing scheduler
+	// Build the provider chain (order = default fallback priority)
+	chain := provider.NewChain()
+	chain.Register(groq.New())           // Try Groq first
+	chain.Register(openrouter.New())     // Fallback to OpenRouter
+	log.Println("Provider chain initialized: groq → openrouter")
+
+	// Make chain available for API key validation
+	apikey.ProviderChain = chain
+
+	// Initialize the fair-queuing scheduler with the provider chain
 	workerCount := 10
 	if wc := os.Getenv("SCHEDULER_WORKERS"); wc != "" {
 		if parsed, err := strconv.Atoi(wc); err == nil && parsed > 0 {
 			workerCount = parsed
 		}
 	}
-	sched := scheduler.NewScheduler(workerCount)
-	gropqproxy.Sched = sched
+	sched := scheduler.NewScheduler(workerCount, chain)
+	chat.Sched = sched
 
 	// Configure response cache TTL (default: 5 minutes)
 	cacheTTL := 300
@@ -111,14 +123,16 @@ func main() {
 		userRoute.POST("/logout", user.Logout)
 	}
 
-	// proxy endpoint group
+	// proxy endpoint group — unified chat endpoint
 	proxyRoute := r.Group("/proxy")
 	proxyRoute.Use(middleware.AuthMiddleware())
 	proxyRoute.Use(middleware.RateLimitMiddleware())
 	{
-		// groqai proxy endpoint
-		proxyRoute.POST("/groqai", gropqproxy.GroqProxy)
+		// Unified AI chat endpoint (replaces /proxy/groqai)
+		proxyRoute.POST("/chat", chat.ChatProxy)
 
+		// Keep legacy endpoint for backward compatibility
+		proxyRoute.POST("/groqai", chat.ChatProxy)
 	}
 
 	apiKeyRoute := r.Group("/key")

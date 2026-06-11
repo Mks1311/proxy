@@ -1,4 +1,4 @@
-package gropqproxy
+package chat
 
 import (
 	"encoding/json"
@@ -9,6 +9,7 @@ import (
 	"github.com/Mks1311/poolify/internal/cache"
 	"github.com/Mks1311/poolify/internal/database"
 	"github.com/Mks1311/poolify/internal/models"
+	"github.com/Mks1311/poolify/internal/provider"
 	"github.com/Mks1311/poolify/internal/ratelimit"
 	"github.com/Mks1311/poolify/internal/scheduler"
 	"github.com/gin-gonic/gin"
@@ -17,15 +18,20 @@ import (
 // Sched is the global scheduler reference, set by main.go during init.
 var Sched *scheduler.Scheduler
 
-func GroqProxy(c *gin.Context) {
+// ChatProxy is the unified handler for all AI chat requests.
+// It routes through the provider chain with automatic fallback.
+func ChatProxy(c *gin.Context) {
 	// 1. Parse request body
 	var input struct {
-		Message string `json:"message"`
-		Stream  bool   `json:"stream"`
+		Message  string   `json:"message"`
+		Stream   bool     `json:"stream"`
+		Priority []string `json:"priority"` // optional: e.g. ["openrouter", "groq"]
 	}
 
 	if err := c.BindJSON(&input); err != nil {
-		c.JSON(400, gin.H{"error": "Invalid request body. Expected: {\"message\": \"your text\", \"stream\": false}"})
+		c.JSON(400, gin.H{
+			"error": "Invalid request body. Expected: {\"message\": \"your text\", \"stream\": false, \"priority\": [\"groq\", \"openrouter\"]}",
+		})
 		return
 	}
 
@@ -43,16 +49,20 @@ func GroqProxy(c *gin.Context) {
 	}
 	user := userInterface.(*models.User)
 
-	// 4. Build the upstream request payload
-	model := "llama-3.3-70b-versatile"
-	reqBody := scheduler.GroqChatRequest{
-		Model: model,
-		Messages: []scheduler.GroqMessage{
+	// 4. Build provider-agnostic payload (just messages, no model)
+	type chatMessage struct {
+		Role    string `json:"role"`
+		Content string `json:"content"`
+	}
+	payload := struct {
+		Messages []chatMessage `json:"messages"`
+	}{
+		Messages: []chatMessage{
 			{Role: "user", Content: input.Message},
 		},
 	}
 
-	jsonData, err := json.Marshal(reqBody)
+	jsonData, err := json.Marshal(payload)
 	if err != nil {
 		c.JSON(500, gin.H{"error": "Failed to marshal request"})
 		return
@@ -60,41 +70,51 @@ func GroqProxy(c *gin.Context) {
 
 	// Branch: streaming vs non-streaming
 	if input.Stream {
-		handleStreamingRequest(c, user, model, jsonData)
+		handleStreamingRequest(c, user, jsonData, input.Priority)
 	} else {
-		handleNonStreamingRequest(c, user, model, jsonData)
+		handleNonStreamingRequest(c, user, jsonData, input.Priority)
 	}
 }
 
+// chatCompletionResponse is a generic OpenAI-compatible response parser.
+type chatCompletionResponse struct {
+	Choices []struct {
+		Message struct {
+			Role    string `json:"role"`
+			Content string `json:"content"`
+		} `json:"message"`
+	} `json:"choices"`
+}
+
 // handleNonStreamingRequest handles the standard JSON request/response flow with caching.
-func handleNonStreamingRequest(c *gin.Context, user *models.User, model string, jsonData []byte) {
+func handleNonStreamingRequest(c *gin.Context, user *models.User, jsonData []byte, priority []string) {
 	// 1. Check cache first
 	cacheKey := cache.GenerateKey(jsonData)
-	if cachedBody, hit := cache.Get(cacheKey); hit {
-		// Cache hit — return cached response without deducting tokens
-		var chatResp scheduler.GroqChatResponse
-		if err := json.Unmarshal(cachedBody, &chatResp); err == nil && len(chatResp.Choices) > 0 {
-			c.JSON(http.StatusOK, gin.H{
-				"message": chatResp.Choices[0].Message.Content,
-				"cached":  true,
-				"usage": gin.H{
-					"prompt_tokens":     0,
-					"completion_tokens": 0,
-					"total_tokens":      0,
-				},
-			})
-			return
-		}
-	}
+	// if cachedBody, hit := cache.Get(cacheKey); hit {
+	// 	// Cache hit — return cached response without deducting tokens
+	// 	var chatResp chatCompletionResponse
+	// 	if err := json.Unmarshal(cachedBody, &chatResp); err == nil && len(chatResp.Choices) > 0 {
+	// 		c.JSON(http.StatusOK, gin.H{
+	// 			"message": chatResp.Choices[0].Message.Content,
+	// 			"cached":  true,
+	// 			"usage": gin.H{
+	// 				"prompt_tokens":     0,
+	// 				"completion_tokens": 0,
+	// 				"total_tokens":      0,
+	// 			},
+	// 		})
+	// 		return
+	// 	}
+	// }
 
 	// 2. Submit to the fair-queuing scheduler
 	job := &scheduler.Job{
-		UserID:   user.ID,
-		Service:  "groq",
-		Model:    model,
-		Payload:  jsonData,
-		Stream:   false,
-		Response: make(chan scheduler.JobResult, 1),
+		UserID:           user.ID,
+		Service:          "chat",
+		Payload:          jsonData,
+		Stream:           false,
+		ProviderPriority: priority,
+		Response:         make(chan provider.Result, 1),
 	}
 
 	Sched.Submit(job)
@@ -104,13 +124,17 @@ func handleNonStreamingRequest(c *gin.Context, user *models.User, model string, 
 
 	// 4. Handle errors from the worker
 	if result.Error != nil {
+		statusCode := result.StatusCode
+		if statusCode == 0 {
+			statusCode = 500
+		}
 		if result.Body != nil {
-			c.JSON(result.StatusCode, gin.H{
+			c.JSON(statusCode, gin.H{
 				"error":   result.Error.Error(),
 				"details": string(result.Body),
 			})
 		} else {
-			c.JSON(result.StatusCode, gin.H{"error": result.Error.Error()})
+			c.JSON(statusCode, gin.H{"error": result.Error.Error()})
 		}
 		return
 	}
@@ -122,11 +146,12 @@ func handleNonStreamingRequest(c *gin.Context, user *models.User, model string, 
 
 	// 6. Deduct tokens from the user's budget (post-response)
 	if result.TotalTokens > 0 {
-		deductAndLogTokens(c, user, model, result.PromptTokens, result.CompletionTokens, result.TotalTokens)
+		deductAndLogTokens(c, user, result.ProviderName, result.ModelUsed,
+			result.PromptTokens, result.CompletionTokens, result.TotalTokens)
 	}
 
 	// 7. Parse the response body to extract the message
-	var chatResp scheduler.GroqChatResponse
+	var chatResp chatCompletionResponse
 	if err := json.Unmarshal(result.Body, &chatResp); err != nil {
 		c.JSON(500, gin.H{
 			"error":        "Failed to parse API response",
@@ -143,10 +168,12 @@ func handleNonStreamingRequest(c *gin.Context, user *models.User, model string, 
 		return
 	}
 
-	// 8. Return successful response with token usage info
+	// 8. Return successful response with provider and model info
 	c.JSON(http.StatusOK, gin.H{
-		"message": chatResp.Choices[0].Message.Content,
-		"cached":  false,
+		"message":  chatResp.Choices[0].Message.Content,
+		"provider": result.ProviderName,
+		"model":    result.ModelUsed,
+		"cached":   false,
 		"usage": gin.H{
 			"prompt_tokens":     result.PromptTokens,
 			"completion_tokens": result.CompletionTokens,
@@ -156,15 +183,15 @@ func handleNonStreamingRequest(c *gin.Context, user *models.User, model string, 
 }
 
 // handleStreamingRequest handles SSE streaming responses.
-func handleStreamingRequest(c *gin.Context, user *models.User, model string, jsonData []byte) {
+func handleStreamingRequest(c *gin.Context, user *models.User, jsonData []byte, priority []string) {
 	// 1. Submit a streaming job to the scheduler
 	job := &scheduler.Job{
-		UserID:     user.ID,
-		Service:    "groq",
-		Model:      model,
-		Payload:    jsonData,
-		Stream:     true,
-		StreamChan: make(chan scheduler.StreamChunk, 100),
+		UserID:           user.ID,
+		Service:          "chat",
+		Payload:          jsonData,
+		Stream:           true,
+		ProviderPriority: priority,
+		StreamChan:       make(chan provider.StreamChunk, 100),
 	}
 
 	Sched.Submit(job)
@@ -184,7 +211,8 @@ func handleStreamingRequest(c *gin.Context, user *models.User, model string, jso
 	}
 
 	// 3. Read chunks from the scheduler and forward them as SSE events
-	var finalUsage *scheduler.TokenUsageInfo
+	var finalUsage *provider.TokenUsageInfo
+	var providerName, modelUsed string
 
 	for chunk := range job.StreamChan {
 		// Handle errors
@@ -194,6 +222,14 @@ func handleStreamingRequest(c *gin.Context, user *models.User, model string, jso
 			break
 		}
 
+		// Track which provider/model is being used
+		if chunk.ProviderName != "" {
+			providerName = chunk.ProviderName
+		}
+		if chunk.ModelUsed != "" {
+			modelUsed = chunk.ModelUsed
+		}
+
 		// Capture usage from the final chunk
 		if chunk.Usage != nil {
 			finalUsage = chunk.Usage
@@ -201,7 +237,7 @@ func handleStreamingRequest(c *gin.Context, user *models.User, model string, jso
 
 		// Forward SSE data
 		if chunk.Done {
-			// Send usage info before [DONE] if we have it
+			// Send usage + provider info before [DONE] if we have it
 			if finalUsage != nil {
 				usageJSON, _ := json.Marshal(gin.H{
 					"usage": gin.H{
@@ -209,6 +245,8 @@ func handleStreamingRequest(c *gin.Context, user *models.User, model string, jso
 						"completion_tokens": finalUsage.CompletionTokens,
 						"total_tokens":      finalUsage.TotalTokens,
 					},
+					"provider": providerName,
+					"model":    modelUsed,
 				})
 				fmt.Fprintf(c.Writer, "data: %s\n\n", string(usageJSON))
 				flusher.Flush()
@@ -224,13 +262,15 @@ func handleStreamingRequest(c *gin.Context, user *models.User, model string, jso
 
 	// 4. Deduct tokens and log usage after stream completes
 	if finalUsage != nil && finalUsage.TotalTokens > 0 {
-		deductAndLogTokens(c, user, model, finalUsage.PromptTokens, finalUsage.CompletionTokens, finalUsage.TotalTokens)
+		deductAndLogTokens(c, user, providerName, modelUsed,
+			finalUsage.PromptTokens, finalUsage.CompletionTokens, finalUsage.TotalTokens)
 	}
 }
 
 // deductAndLogTokens handles the post-response token deduction from Redis
 // and writes a TokenUsage record to Postgres.
-func deductAndLogTokens(c *gin.Context, user *models.User, model string, promptTokens, completionTokens, totalTokens int) {
+func deductAndLogTokens(c *gin.Context, user *models.User, providerName, modelUsed string,
+	promptTokens, completionTokens, totalTokens int) {
 	// Deduct from Redis budget
 	limiterInterface, exists := c.Get("limiter")
 	if exists {
@@ -244,8 +284,8 @@ func deductAndLogTokens(c *gin.Context, user *models.User, model string, promptT
 	// Log to Postgres
 	tokenUsage := models.TokenUsage{
 		UserID:           user.ID,
-		Service:          "groq",
-		Model:            model,
+		Service:          providerName,
+		Model:            modelUsed,
 		PromptTokens:     promptTokens,
 		CompletionTokens: completionTokens,
 		TotalTokens:      totalTokens,

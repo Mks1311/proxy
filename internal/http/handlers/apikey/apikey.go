@@ -3,15 +3,25 @@ package apikey
 import (
 	"context"
 	"fmt"
+	"log"
 	"net/http"
 	"time"
 
 	"github.com/Mks1311/poolify/internal/database"
 	"github.com/Mks1311/poolify/internal/models"
+	"github.com/Mks1311/poolify/internal/provider"
 	"github.com/gin-gonic/gin"
 	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
 )
+
+// ProviderChain is the global provider chain reference, set by main.go during init.
+// Used for key validation when users submit new API keys.
+var ProviderChain *provider.Chain
+
+// TokensPerKeyContribution is how many tokens a user's daily limit increases
+// when they contribute a valid API key.
+const TokensPerKeyContribution = 200
 
 func AddApiKey(c *gin.Context) {
 	var input struct {
@@ -37,7 +47,16 @@ func AddApiKey(c *gin.Context) {
 		return
 	}
 
-	// 3. Get user from context
+	// 3. Validate service is a known provider
+	if !provider.IsValidProvider(input.Service) {
+		c.JSON(400, gin.H{
+			"error":              fmt.Sprintf("Unknown service provider: %s", input.Service),
+			"supported_services": provider.SupportedProviders(),
+		})
+		return
+	}
+
+	// 4. Get user from context
 	userInterface, exists := c.Get("user")
 	if !exists {
 		c.JSON(500, gin.H{"error": "User not found in context"})
@@ -47,7 +66,20 @@ func AddApiKey(c *gin.Context) {
 
 	user := userInterface.(*models.User)
 
-	// 4. Create API key pool
+	// 5. Validate the API key by making a dummy call to the provider
+	if ProviderChain != nil {
+		log.Printf("Validating %s API key for user %s...", input.Service, user.ID)
+		if err := ProviderChain.ValidateKey(input.Service, input.ApiKey); err != nil {
+			c.JSON(400, gin.H{
+				"error":   fmt.Sprintf("API key validation failed: %s", err.Error()),
+				"message": "Please provide a valid API key",
+			})
+			return
+		}
+		log.Printf("API key validated successfully for %s", input.Service)
+	}
+
+	// 6. Create API key pool entry
 	apiKeyPool := models.APIKeyPool{
 		Service:       input.Service,
 		APIKey:        input.ApiKey,
@@ -61,9 +93,22 @@ func AddApiKey(c *gin.Context) {
 		return
 	}
 
+	// 7. Increase user's daily token limit as a reward for contributing a key
+	if err := database.DB.Model(&models.User{}).
+		Where("id = ?", user.ID).
+		UpdateColumn("daily_limit", gorm.Expr("daily_limit + ?", TokensPerKeyContribution)).Error; err != nil {
+		log.Printf("Warning: failed to increase daily limit for user %s: %v", user.ID, err)
+	}
+
+	// Refresh user to get the updated daily limit
+	var updatedUser models.User
+	database.DB.First(&updatedUser, "id = ?", user.ID)
+
 	c.JSON(201, gin.H{
-		"message": "API key pool created successfully",
-		"data":    apiKeyPool,
+		"message":         "API key added successfully",
+		"data":            apiKeyPool,
+		"daily_limit_new": updatedUser.DailyLimit,
+		"tokens_added":    TokensPerKeyContribution,
 	})
 }
 

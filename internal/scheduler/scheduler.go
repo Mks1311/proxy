@@ -1,49 +1,27 @@
 package scheduler
 
 import (
-	"fmt"
 	"log"
 	"sync"
+
+	"github.com/Mks1311/poolify/internal/provider"
 )
 
 // Job represents a single proxy request submitted by a user.
 type Job struct {
-	UserID     string
-	Service    string
-	Model      string
-	Payload    []byte           // The raw JSON body to send to the upstream provider
-	Stream     bool             // If true, use StreamChan instead of Response
-	Response   chan JobResult    // Used for non-streaming jobs
-	StreamChan chan StreamChunk  // Used for streaming jobs
-}
-
-// JobResult is sent back to the HTTP handler after the worker finishes (non-streaming).
-type JobResult struct {
-	StatusCode       int
-	Body             []byte
-	PromptTokens     int
-	CompletionTokens int
-	TotalTokens      int
-	Error            error
-}
-
-// StreamChunk is sent incrementally to the HTTP handler during streaming.
-type StreamChunk struct {
-	Data  string         // The SSE data payload (JSON chunk or "[DONE]")
-	Done  bool           // True for the final signal
-	Usage *TokenUsageInfo // Populated only on the final chunk
-	Error error
-}
-
-// TokenUsageInfo carries token usage from the final streaming chunk.
-type TokenUsageInfo struct {
-	PromptTokens     int
-	CompletionTokens int
-	TotalTokens      int
+	UserID           string
+	Service          string                   // kept for logging/testing
+	Model            string                   // if empty, each provider uses its default
+	Payload          []byte                   // The raw JSON body (messages only, no model)
+	Stream           bool                     // If true, use StreamChan instead of Response
+	ProviderPriority []string                 // User-specified provider order, e.g. ["openrouter", "groq"]
+	Response         chan provider.Result      // Used for non-streaming jobs
+	StreamChan       chan provider.StreamChunk // Used for streaming jobs
 }
 
 // Scheduler implements fair queuing with per-user round-robin dispatching.
 type Scheduler struct {
+	chain      *provider.Chain
 	submitChan chan *Job
 	mu         sync.Mutex
 	userQueues map[string][]*Job
@@ -52,8 +30,9 @@ type Scheduler struct {
 }
 
 // NewScheduler creates a scheduler and starts the dispatcher + worker pool.
-func NewScheduler(workerCount int) *Scheduler {
+func NewScheduler(workerCount int, chain *provider.Chain) *Scheduler {
 	s := &Scheduler{
+		chain:      chain,
 		submitChan: make(chan *Job, 1000),
 		userQueues: make(map[string][]*Job),
 	}
@@ -176,43 +155,16 @@ func (s *Scheduler) drainQueues(dispatchChan chan<- *Job, pendingSignal chan str
 	}
 }
 
-// worker processes jobs from the dispatch channel.
+// worker processes jobs from the dispatch channel using the provider chain.
 func (s *Scheduler) worker(id int, dispatchChan <-chan *Job) {
 	for job := range dispatchChan {
 		if job.Stream {
-			// Streaming job: worker writes chunks to StreamChan, then closes it
-			executeStreamingJob(job)
+			// Streaming job: chain writes chunks to StreamChan and closes it when done
+			s.chain.ExecuteStream(job.Payload, job.Model, job.ProviderPriority, job.StreamChan)
 		} else {
-			// Non-streaming job: worker sends a single result
-			result := executeJob(job)
+			// Non-streaming job: chain returns a result
+			result := s.chain.Execute(job.Payload, job.Model, job.ProviderPriority)
 			job.Response <- result
 		}
-	}
-}
-
-// executeJob runs the actual upstream API call based on the service type (non-streaming).
-func executeJob(job *Job) JobResult {
-	switch job.Service {
-	case "groq":
-		return ExecuteGroqRequest(job.Payload, job.Model)
-	default:
-		return JobResult{
-			StatusCode: 500,
-			Error:      fmt.Errorf("unsupported service: %s", job.Service),
-		}
-	}
-}
-
-// executeStreamingJob runs the streaming upstream API call (writes chunks to StreamChan).
-func executeStreamingJob(job *Job) {
-	switch job.Service {
-	case "groq":
-		StreamGroqRequest(job.Payload, job.Model, job.StreamChan)
-	default:
-		job.StreamChan <- StreamChunk{
-			Error: fmt.Errorf("unsupported service for streaming: %s", job.Service),
-			Done:  true,
-		}
-		close(job.StreamChan)
 	}
 }
